@@ -1,0 +1,17 @@
+# 敏感配置（含 API Key、Token、Cookie）
+.env
+config.json
+cookies.json
+
+# 运行时数据
+data/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+uv.lock
+
+# 系统
+.DS_Store
+.claude/

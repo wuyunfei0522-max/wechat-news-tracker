@@ -1,0 +1,27 @@
+{
+  "feeds": [
+    {
+      "name": "The Verge · Tech",
+      "url": "https://www.theverge.com/rss/group/tech/index.xml",
+      "enabled": true,
+      "keywords": []
+    },
+    {
+      "name": "The Verge · Reviews",
+      "url": "https://www.theverge.com/rss/group/reviews/index.xml",
+      "enabled": true,
+      "keywords": []
+    }
+  ],
+  "kickstarter": {
+    "enabled": true,
+    "max_per_day": 5
+  },
+  "send_time": "14:00",
+  "max_per_day": 10,
+  "wechat": {
+    "token": "YOUR_WECHAT_CLAWBOT_TOKEN",
+    "user_id": "YOUR_WECHAT_USER_ID",
+    "api_base": "https://ilinkai.weixin.qq.com"
+  }
+}
