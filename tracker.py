@@ -74,6 +74,8 @@ def load_cookies() -> dict:
 # ── RSS 抓取 ───────────────────────────────────────────────────────────────────
 
 def fetch_articles(feed_cfg: dict, sent: set, limit: int) -> list[dict]:
+    if "max" in feed_cfg:
+        limit = min(limit, feed_cfg["max"])
     try:
         parsed = feedparser.parse(feed_cfg["url"])
     except Exception as e:
@@ -149,11 +151,14 @@ def fetch_kickstarter_projects(sent: set, max_count: int = 5) -> list[dict]:
             return items;
         }""")
 
+        SOFTWARE_CATEGORIES = {"software", "apps", "web"}
+
         results = []
         for proj in raw:
             if proj.get("state") != "live":
                 continue
-            if proj.get("prelaunch_activated"):
+            cat_name = proj.get("category", {}).get("name", "").lower()
+            if cat_name in SOFTWARE_CATEGORIES:
                 continue
             pid = f"ks_{proj['id']}"
             if pid in sent:
@@ -164,15 +169,19 @@ def fetch_kickstarter_projects(sent: set, max_count: int = 5) -> list[dict]:
             deadline_ts = proj.get("deadline", 0)
             deadline = datetime.fromtimestamp(deadline_ts, CST).strftime("%-m月%-d日") if deadline_ts else "未知"
             backers = proj.get("backers_count", 0)
-            summary = (
-                f"{proj.get('blurb', '')} "
-                f"（已达目标 {percent}%，目标金额 ${goal_usd:,}，"
-                f"支持者 {backers} 人，截止 {deadline}）"
-            )
+            is_prelaunch = bool(proj.get("prelaunch_activated"))
+            if is_prelaunch:
+                summary = proj.get("blurb", "")
+            else:
+                summary = (
+                    f"{proj.get('blurb', '')} "
+                    f"（已达目标 {percent}%，目标金额 ${goal_usd:,}，"
+                    f"支持者 {backers} 人，截止 {deadline}）"
+                )
             results.append({
                 "id": pid,
-                "source": "Kickstarter",
-                "title": proj.get("name", ""),
+                "source": "KS",
+                "title": proj.get("name", "") + ("（预发布）" if is_prelaunch else ""),
                 "summary": summary,
                 "link": url,
                 "percent_funded": percent,
@@ -296,7 +305,7 @@ def translate_digest(articles: list[dict]) -> tuple[list[dict], str]:
         for i, a in enumerate(filtered)
     )
     text = _deepseek(
-        "以下是今天的科技新闻原文（英文），请整理成中文日报。\n"
+        "以下是今天的科技新闻，请整理成中文日报。\n"
         "要求：\n"
         "- 严格按序号顺序处理，每条对应输入中的同一序号，不要跳过或合并\n"
         "- 纯新闻/发布类：一两句说清楚发生了什么\n"
@@ -304,7 +313,35 @@ def translate_digest(articles: list[dict]) -> tuple[list[dict], str]:
         "- 序号列表，每条之间空一行，不加标题\n\n"
         + items
     )
+    # 回填来源标注：在行首序号后插入 [来源]
+    source_map = {i + 1: a["source"] for i, a in enumerate(filtered)}
+    def _insert_source(m):
+        num = int(m.group(1))
+        src = source_map.get(num, "")
+        return f"{num}. [{src}] " if src else m.group(0)
+    text = re.sub(r"(?m)^(\d+)\.\s*", _insert_source, text)
     return filtered, text
+
+
+def translate_ks_digest(articles: list[dict], offset: int = 0) -> str:
+    """将 KS 项目列表翻译成中文简报，序号从 offset+1 开始"""
+    if not articles:
+        return ""
+    items = "\n\n".join(
+        f"{offset + i + 1}. {a['title']}\n{a['summary']}"
+        for i, a in enumerate(articles)
+    )
+    text = _deepseek(
+        "以下是 Kickstarter 上的最新硬件众筹项目，请用中文整理成简报。\n"
+        "要求：\n"
+        "- 严格按序号顺序，每条一两句，说清楚是什么产品、解决什么问题\n"
+        "- 序号列表，每条之间空一行，不加标题\n\n"
+        + items
+    )
+    # 回填正确序号（DeepSeek 可能重新从1编号）
+    correct_nums = iter(range(offset + 1, offset + len(articles) + 1))
+    text = re.sub(r"(?m)^(\d+)\.\s*", lambda m: f"{next(correct_nums)}. ", text)
+    return text
 
 
 def translate_full_article(title: str, body: str) -> str:
@@ -416,50 +453,61 @@ def wechat_send_sync(text: str, cfg: dict) -> bool:
 def do_daily_push(cfg: dict):
     sent = load_sent()
     max_per_day = cfg.get("max_per_day", 8)
-    all_articles = []
+    rss_articles = []
 
     for feed_cfg in cfg.get("feeds", []):
         if not feed_cfg.get("enabled", True):
             continue
-        articles = fetch_articles(feed_cfg, sent, max_per_day - len(all_articles))
-        all_articles.extend(articles)
-        if len(all_articles) >= max_per_day:
+        articles = fetch_articles(feed_cfg, sent, max_per_day - len(rss_articles))
+        rss_articles.extend(articles)
+        if len(rss_articles) >= max_per_day:
             break
 
-    # Kickstarter 科技类众筹项目
+    ks_articles = []
     ks_cfg = cfg.get("kickstarter", {})
     if ks_cfg.get("enabled", False):
         ks_max = ks_cfg.get("max_per_day", 5)
-        ks_projects = fetch_kickstarter_projects(sent, ks_max)
-        all_articles.extend(ks_projects)
+        ks_articles = fetch_kickstarter_projects(sent, ks_max)
 
-    if not all_articles:
+    if not rss_articles and not ks_articles:
         print(f"[{_now()}] 今天没有新文章")
         return
 
-    print(f"[{_now()}] 共 {len(all_articles)} 篇新文章，翻译中…")
-    try:
-        kept, digest = translate_digest(all_articles)
-    except Exception as e:
-        print(f"  [错误] 翻译失败: {e}")
-        return
+    kept_rss, rss_text = [], ""
+    if rss_articles:
+        print(f"[{_now()}] 共 {len(rss_articles)} 篇新闻，翻译中…")
+        try:
+            kept_rss, rss_text = translate_digest(rss_articles)
+        except Exception as e:
+            print(f"  [错误] 新闻翻译失败: {e}")
 
-    if not kept:
+    ks_text = ""
+    if ks_articles:
+        print(f"[{_now()}] 共 {len(ks_articles)} 个众筹项目，翻译中…")
+        try:
+            ks_text = translate_ks_digest(ks_articles, offset=len(kept_rss))
+        except Exception as e:
+            print(f"  [错误] 众筹翻译失败: {e}")
+
+    if not kept_rss and not ks_articles:
         print(f"[{_now()}] 全部为广告，跳过推送")
         return
 
     date_str = datetime.now(CST).strftime("%Y年%-m月%-d日")
-    msg = (
-        f"📰 科技日报 · {date_str}\n\n"
-        f"{digest}\n\n"
-        f"——\n回复数字（如「1」）可获取该篇详细解读"
-    )
+    parts = ["我最帅气的碳基主人，这是今天为你整理的消息"]
+    if rss_text:
+        parts.append(f"📰 科技日报 · {date_str}\n\n{rss_text}")
+    if ks_text:
+        parts.append(f"🚀 最新众筹\n\n{ks_text}")
+    parts.append("——\n回复数字（如「1」）可获取该篇详细解读")
+    msg = "\n\n".join(parts)
 
     print(f"\n--- 消息预览 ---\n{msg[:300]}…\n---\n")
+    all_kept = kept_rss + ks_articles
     ok = wechat_send_sync(msg, cfg)
     if ok:
-        save_today(kept)  # 只存过滤后的文章，序号与简报一致
-        for a in all_articles:
+        save_today(all_kept)
+        for a in all_kept:
             sent.add(a["id"])
         save_sent(sent)
         print(f"[{_now()}] ✅ 推送成功")
@@ -499,7 +547,7 @@ def _do_translate(idx: str, cfg: dict):
     wechat_send_sync(f"正在解读《{article['title']}》，稍等…", cfg)
     print(f"[{_now()}] 解读第 {idx} 篇: {article['title']}")
 
-    is_kickstarter = article.get("source") == "Kickstarter"
+    is_kickstarter = article.get("source") == "KS"
 
     if is_kickstarter:
         creator = article.get("creator", "")
