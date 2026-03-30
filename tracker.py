@@ -151,14 +151,18 @@ def fetch_kickstarter_projects(sent: set, max_count: int = 5) -> list[dict]:
             return items;
         }""")
 
-        SOFTWARE_CATEGORIES = {"software", "apps", "web"}
+        HARDWARE_CATEGORIES = {
+            "hardware", "diy electronics", "gadgets", "wearables",
+            "camera equipment", "fabrication", "flight", "robots",
+            "space exploration", "sound", "3d printing",
+        }
 
         results = []
         for proj in raw:
             if proj.get("state") != "live":
                 continue
             cat_name = proj.get("category", {}).get("name", "").lower()
-            if cat_name in SOFTWARE_CATEGORIES:
+            if cat_name not in HARDWARE_CATEGORIES:
                 continue
             pid = f"ks_{proj['id']}"
             if pid in sent:
