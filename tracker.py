@@ -657,13 +657,28 @@ async def cmd_setup():
         await asyncio.sleep(3)
 
 
+_SYNC_FILE = Path.home() / ".openclaw" / "openclaw-weixin" / "accounts" / "ee2f7450da2f-im-bot.sync.json"
+
+def _read_sync_buf() -> str:
+    """读取 OpenClaw 共享游标，避免与 OpenClaw 重复处理同一条消息"""
+    try:
+        return json.loads(_SYNC_FILE.read_text()).get("get_updates_buf", "")
+    except Exception:
+        return ""
+
+def _write_sync_buf(buf: str):
+    """回写游标，OpenClaw 下次 poll 将从此位置继续"""
+    try:
+        _SYNC_FILE.write_text(json.dumps({"get_updates_buf": buf}))
+    except Exception:
+        pass
+
 async def message_listener(cfg: dict):
     """独立监听用户消息，翻译任务在后台运行，不阻塞轮询"""
     from wechat_clawbot.api.client import get_updates
     account = _load_openclaw_account()
     base_url = account.get("baseUrl", "https://ilinkai.weixin.qq.com") if account else cfg["wechat"].get("api_base", "https://ilinkai.weixin.qq.com")
     token = account["token"] if account else cfg["wechat"]["token"]
-    buf = ""
     in_progress: set[str] = set()  # 正在翻译的序号，防重复
     print(f"[{_now()}] 消息监听已启动")
 
@@ -677,10 +692,11 @@ async def message_listener(cfg: dict):
 
     while True:
         try:
+            buf = _read_sync_buf()
             resp = await get_updates(base_url=base_url, token=token,
                                      get_updates_buf=buf, timeout_ms=8000)
             if resp.get_updates_buf:
-                buf = resp.get_updates_buf
+                _write_sync_buf(resp.get_updates_buf)
             for msg in (resp.msgs or []):
                 for item in (msg.item_list or []):
                     if item.text_item and item.text_item.text:
@@ -724,6 +740,12 @@ async def cmd_translate(idx: str):
     print(f"[{_now()}] 已写入队列：第 {idx} 篇")
 
 
+def cmd_read(idx: str):
+    """直接翻译并通过微信发送（供 OpenClaw Agent 调用，Agent 无需回复）"""
+    cfg = load_config()
+    _do_translate(idx, cfg)
+
+
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
     if cmd == "setup":
@@ -734,6 +756,8 @@ def main():
         asyncio.run(cmd_test())
     elif cmd == "translate" and len(sys.argv) > 2:
         asyncio.run(cmd_translate(sys.argv[2]))
+    elif cmd == "read" and len(sys.argv) > 2:
+        cmd_read(sys.argv[2])
     else:
         print(__doc__)
 
